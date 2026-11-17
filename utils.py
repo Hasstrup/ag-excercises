@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import base64
 import mimetypes
@@ -105,6 +106,7 @@ def print_html(content: Any, title: str | None = None, is_image: bool = False):
     card = f'<div class="pretty-card">{title_html}{rendered}</div>'
     display(HTML(css + card))
 
+
 def get_response(model:str, prompt: str) -> str:
     if "claude" in model.lower() or "anthropic" in model.lower():
         message = anthropic_client.messages.create(
@@ -123,4 +125,59 @@ def encode_image_b64(chart_path: str) -> tuple[str, str]:
     with open(chart_path, "rb") as image_file:
         encoded_string = base64.b64encode(image_file.read())
     return media_type, encoded_string
+
+
+def image_anthropic_call(model_name: str, prompt: str, media_type: str, b64: str) -> str:
+    """
+        Call Anthropic Claude (messages.create) with text+image and return *all* text blocks
+        concatenated. Adds a system message to enforce strict JSON output.
+    """
+    msg = anthropic_client.messages.create(
+        model=model_name,
+        max_tokens=2000,
+        temperature=0,
+        system=(
+            """
+             You are a careful assistant. Respond with a single valid JSON object only. 
+              Do not include markdown, code fences, or commentary outside JSON
+            """
+        ),
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64 }},
+            ]
+        }]
+    )
+    
+    parts = []
+    for block in (msg.content or []):
+        if getattr(block, "type", None) == "text":
+            parts.append(block.text)
+    return "".join(parts).strip()
+
+def image_openai_call(model_name: str, prompt: str, media_type: str, b64: str) -> str:
+    """
+      Call Anthropic Claude (messages.create) with text+image and return *all* text blocks
+      concatenated. Adds a system message to enforce strict JSON output.
+    """
+    data_url = f"data:{media_type};base64,{b64}"
+    resp = openai_client.responses.create(
+        model=model_name,
+    input=[{ "role": "user", "content": [
+        { "type": "input_text", "text": prompt },
+        { "type": "input_image", "image_url": data_url },
+    ]}])
+    return (resp.output_text or "").strip()
+
+def ensure_execute_python_tags(text: str) -> str:
+    """
+        Normalize code to be wrapped in <execute_python>...</execute_python>. 
+    """
+    text = text.strip()
+    text = re.sub(r"^```(?:python)?\s*|\s*```$", "", text)
+    if "<execute_python>" not in text:
+        text = f"<execute_python>\n{text}</execute_python>"
+    return text
     
