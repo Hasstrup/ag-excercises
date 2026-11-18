@@ -181,12 +181,10 @@ def ensure_execute_python_tags(text: str) -> str:
 
 
 def extract_code(text: str) -> str:
-    """Return the code inside <execute_python></execute_python>(or the raw text if no tags).
-    """
+    """Return the code inside <execute_python></execute_python>(or the raw text if no tags)"""
     m = re.search(r"<execute_python>([\s\S]*?)</execute_python>", text)
     code = m.group(1) if m else text
     code = re.sub(r"^```(?:python)?\s*|\s*```$", "", code.strip()).strip()
-
     return code
     
 
