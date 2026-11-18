@@ -17,33 +17,33 @@ anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else OpenAI()
 anthropic_client = Anthropic(api_key= anthropic_api_key) if anthropic_api_key else Anthropic()
 
-
 def load_and_prepare_data(data_path):
-    """
-    Load and prepare data from the specified source.
-
-    Args:
-        source (str): The path to the data source (e.g., CSV file, database).
-    """
+    """Load and prepare data from the specified source"""
     csv_path = os.path.join(os.getcwd(), data_path)
     df = pd.read_csv(csv_path)
+
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["quarter"] = df["date"].dt.quarter
         df["month"] = df["date"].dt.month
         df["year"] = pd.to_datetime(df["date"], errors="coerce")
+
     return df
 
+
 from IPython.display import HTML, display
+
 
 def print_html(content: Any, title: str | None = None, is_image: bool = False):
     try:
         from html import escape as _escape
     except ImportError:
         _escape = lambda x:x
+
     def image_to_base64(image_path: str) -> str:
         with open(image_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
+    
     if is_image and isinstance(content, str):
         b64 = image_to_base64(content)
         rendered = f'<img src="data:image/png;base64{b64}" alt="Image" style="max-width:100%;height:auto;border-radius:8px;">'
@@ -55,6 +55,7 @@ def print_html(content: Any, title: str | None = None, is_image: bool = False):
         rendered = f"<pre><code>{_escape(content)}</code></pre>"
     else:
         rendered = f"<pre><code>{_escape(str(content))}</code></pre>"
+    
     css = """
     <style>
     .pretty-card{
@@ -115,10 +116,12 @@ def get_response(model:str, prompt: str) -> str:
             messages=[{"role": "user", "content": [{ "type": "text", "text": prompt }]}]
         )
         return message.content[0].text
+
     else:
         response = openai_client.responses.create(model=model, input=prompt)
         return response.output_text
-    
+
+ 
 def encode_image_b64(chart_path: str) -> tuple[str, str]:
     mime, _ = mimetypes.guess_type(chart_path)
     media_type = mime or "image/png"
@@ -128,10 +131,6 @@ def encode_image_b64(chart_path: str) -> tuple[str, str]:
 
 
 def image_anthropic_call(model_name: str, prompt: str, media_type: str, b64: str) -> str:
-    """
-        Call Anthropic Claude (messages.create) with text+image and return *all* text blocks
-        concatenated. Adds a system message to enforce strict JSON output.
-    """
     msg = anthropic_client.messages.create(
         model=model_name,
         max_tokens=2000,
@@ -155,13 +154,11 @@ def image_anthropic_call(model_name: str, prompt: str, media_type: str, b64: str
     for block in (msg.content or []):
         if getattr(block, "type", None) == "text":
             parts.append(block.text)
+
     return "".join(parts).strip()
 
+
 def image_openai_call(model_name: str, prompt: str, media_type: str, b64: str) -> str:
-    """
-      Call Anthropic Claude (messages.create) with text+image and return *all* text blocks
-      concatenated. Adds a system message to enforce strict JSON output.
-    """
     data_url = f"data:{media_type};base64,{b64}"
     resp = openai_client.responses.create(
         model=model_name,
@@ -169,15 +166,65 @@ def image_openai_call(model_name: str, prompt: str, media_type: str, b64: str) -
         { "type": "input_text", "text": prompt },
         { "type": "input_image", "image_url": data_url },
     ]}])
+
     return (resp.output_text or "").strip()
 
+
 def ensure_execute_python_tags(text: str) -> str:
-    """
-        Normalize code to be wrapped in <execute_python>...</execute_python>. 
-    """
+    """ Normalize code to be wrapped in <execute_python>...</execute_python>"""
     text = text.strip()
     text = re.sub(r"^```(?:python)?\s*|\s*```$", "", text)
+
     if "<execute_python>" not in text:
         text = f"<execute_python>\n{text}</execute_python>"
     return text
+
+
+def extract_code(text: str) -> str:
+    """Return the code inside <execute_python></execute_python>(or the raw text if no tags).
+    """
+    m = re.search(r"<execute_python>([\s\S]*?)</execute_python>", text)
+    code = m.group(1) if m else text
+    code = re.sub(r"^```(?:python)?\s*|\s*```$", "", code.strip()).strip()
+
+    return code
     
+
+def run_generated_code(code: str, df: pd.DataFrame, model: str = 'gpt-4o-mini', max_retries: int = 1) -> str:
+    code = extract_code(code)
+    
+    def generate_fix_prompt(tb: str, code: str) -> str:
+        return f"""
+            The following python/matplotlib code raised an error when executed,
+             Fix the code so it runs without errors and produces the same chart. 
+        
+             Rules: 
+            - Keep the same intent, title, labels and output path. 
+            - Do NOT use ax.bar_label / plt.bar_label; if value labels are needed use
+                ax.text with f-strings.
+            - Only use plain format strings like f"{{v:,.0f}} (no spaces insdie format specifiers)
+            - Use pandas/matplotlib only. Assume df already exists.
+            - Do not call plt.show(); call plt.close() at the end. 
+            - Return ONLy the corrected code wrapped in <execute_python></execute_python> tags, no prose.
+        
+            Error:
+            {tb}
+            
+            Code:
+            {code}
+        """
+    
+    for attempt in range(max_retries + 1):
+        try:
+            exec(code, {"df": df})
+            return code
+        except Exception:
+            import traceback as _traceback
+
+            tb = _traceback.format_exc()
+            if attempt == max_retries:
+                print_html(tb, title="Generated code failed after max retries")
+                return code
+
+            print_html(tb, title=f"generated code failed @ attempt {attempt + 1}")
+            code = extract_code(get_response(model, generate_fix_prompt(tb, code)))
